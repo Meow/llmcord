@@ -1,11 +1,9 @@
-FROM python:3.13-slim
+FROM python:3.13.9-alpine3.22
 
-ARG DEBIAN_FRONTEND=noninteractive
+WORKDIR /opt/llmcord
 
-WORKDIR /app
-
-COPY requirements.txt .
+COPY . /opt/llmcord
 
 RUN pip install --no-cache-dir -r requirements.txt
 
-CMD ["python", "llmcord.py"]
+CMD [ "python", "/opt/llmcord/llmcord.py" ]

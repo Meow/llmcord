@@ -1,14 +1,16 @@
 import asyncio
-from base64 import b64encode
+from base64 import b64decode, b64encode
 from dataclasses import dataclass, field
 from datetime import datetime
 import logging
+from types import SimpleNamespace
 from typing import Any, Literal, Optional
 
 import discord
 from discord.app_commands import Choice
 from discord.ext import commands
 from discord.ui import LayoutView, TextDisplay
+import google.generativeai as genai
 import httpx
 from openai import AsyncOpenAI
 import yaml
@@ -143,9 +145,11 @@ async def on_message(new_msg: discord.Message) -> None:
 
     provider_config = config["providers"][provider]
 
-    base_url = provider_config["base_url"]
+    use_native_api = provider == "google" and provider_config.get("use_native_api")
+
+    base_url = provider_config.get("base_url", "")
     api_key = provider_config.get("api_key", "sk-no-key-required")
-    openai_client = AsyncOpenAI(base_url=base_url, api_key=api_key)
+    openai_client = None if use_native_api else AsyncOpenAI(base_url=base_url, api_key=api_key)
 
     model_parameters = config["models"].get(provider_slash_model, None)
 
@@ -154,7 +158,7 @@ async def on_message(new_msg: discord.Message) -> None:
     extra_body = (provider_config.get("extra_body") or {}) | (model_parameters or {}) or None
 
     accept_images = any(x in provider_slash_model.lower() for x in VISION_MODEL_TAGS)
-    accept_usernames = any(provider_slash_model.lower().startswith(x) for x in PROVIDERS_SUPPORTING_USERNAMES)
+    accept_usernames = any(provider_slash_model.lower().startswith(x) for x in PROVIDERS_SUPPORTING_USERNAMES) or use_native_api
 
     max_text = config.get("max_text", 100000)
     max_images = config.get("max_images", 5) if accept_images else 0
@@ -257,7 +261,66 @@ async def on_message(new_msg: discord.Message) -> None:
     response_msgs = []
     response_contents = []
 
-    openai_kwargs = dict(model=model, messages=messages[::-1], stream=True, extra_headers=extra_headers, extra_query=extra_query, extra_body=extra_body)
+    if use_native_api:
+        genai.configure(api_key=api_key)
+
+        gemini_history = []
+        system_instruction = None
+
+        for msg in messages[::-1]:
+            if msg["role"] == "system":
+                system_instruction = msg["content"]
+                continue
+
+            parts = []
+            if "name" in msg:
+                parts.append(f"<@{msg['name']}>")
+
+            if isinstance(msg["content"], str):
+                parts.append(msg["content"])
+            else:
+                for item in msg["content"]:
+                    if item["type"] == "text":
+                        parts.append(item["text"])
+                    elif item["type"] == "image_url":
+                        header, b64_data = item["image_url"]["url"].split(",", 1)
+                        mime_type = header.split(":")[1].split(";")[0]
+                        parts.append(dict(mime_type=mime_type, data=b64decode(b64_data)))
+
+            gemini_history.append(dict(role="user" if msg["role"] == "user" else "model", parts=parts))
+
+        gemini_model = genai.GenerativeModel(model_name=model, system_instruction=system_instruction)
+
+        safety_settings = provider_config.get("safety_settings")
+        if safety_settings:
+            safety_settings = {k: "BLOCK_NONE" if isinstance(v, str) and v.upper() == "OFF" else v for k, v in safety_settings.items()}
+
+        async def get_response_stream():
+            async for chunk in await gemini_model.generate_content_async(gemini_history, stream=True, safety_settings=safety_settings):
+                finish_reason = chunk.candidates[0].finish_reason if chunk.candidates else None
+                if finish_reason == 1:
+                    finish_reason = "stop"
+                elif finish_reason == 2:
+                    finish_reason = "length"
+                elif finish_reason:
+                    finish_reason = str(finish_reason)
+                else:
+                    finish_reason = None
+                
+                content = ""
+                try:
+                    content = chunk.text
+                except ValueError:
+                    pass
+                
+                yield SimpleNamespace(choices=[SimpleNamespace(finish_reason=finish_reason, delta=SimpleNamespace(content=content))])
+
+    else:
+        openai_kwargs = dict(model=model, messages=messages[::-1], stream=True, extra_headers=extra_headers, extra_query=extra_query, extra_body=extra_body)
+
+        async def get_response_stream():
+            async for chunk in await openai_client.chat.completions.create(**openai_kwargs):
+                yield chunk
 
     if use_plain_responses := config.get("use_plain_responses", False):
         max_message_length = 4000
@@ -275,7 +338,7 @@ async def on_message(new_msg: discord.Message) -> None:
 
     try:
         async with new_msg.channel.typing():
-            async for chunk in await openai_client.chat.completions.create(**openai_kwargs):
+            async for chunk in get_response_stream():
                 if finish_reason != None:
                     break
 
