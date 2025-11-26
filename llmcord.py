@@ -274,7 +274,7 @@ async def on_message(new_msg: discord.Message) -> None:
 
             parts = []
             if "name" in msg:
-                parts.append(f"<@{msg['name']}>")
+                parts.append(f"The name of the user is <@{msg['name']}>")
 
             if isinstance(msg["content"], str):
                 parts.append(msg["content"])
