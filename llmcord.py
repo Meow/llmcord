@@ -22,6 +22,7 @@ logging.basicConfig(
 
 VISION_MODEL_TAGS = ("claude", "gemini", "gemma", "gpt-4", "gpt-5", "grok-4", "llama", "llava", "mistral", "o3", "o4", "vision", "vl")
 PROVIDERS_SUPPORTING_USERNAMES = ("openai", "x-ai")
+ALLOWED_GEMINI_PARAMS = ("candidate_count", "stop_sequences", "max_output_tokens", "temperature", "top_p", "top_k", "response_mime_type", "response_schema")
 
 EMBED_COLOR_COMPLETE = discord.Color.dark_green()
 EMBED_COLOR_INCOMPLETE = discord.Color.orange()
@@ -274,7 +275,7 @@ async def on_message(new_msg: discord.Message) -> None:
 
             parts = []
             if "name" in msg:
-                parts.append(f"The name of the user is <@{msg['name']}>")
+                parts.append(f"The user is <@{msg['name']}>")
 
             if isinstance(msg["content"], str):
                 parts.append(msg["content"])
@@ -295,8 +296,10 @@ async def on_message(new_msg: discord.Message) -> None:
         if safety_settings:
             safety_settings = {k: "BLOCK_NONE" if isinstance(v, str) and v.upper() == "OFF" else v for k, v in safety_settings.items()}
 
+        generation_config = {k: v for k, v in extra_body.items() if k in ALLOWED_GEMINI_PARAMS} if extra_body else None
+
         async def get_response_stream():
-            async for chunk in await gemini_model.generate_content_async(gemini_history, stream=True, safety_settings=safety_settings):
+            async for chunk in await gemini_model.generate_content_async(gemini_history, stream=True, safety_settings=safety_settings, generation_config=generation_config):
                 finish_reason = chunk.candidates[0].finish_reason if chunk.candidates else None
                 if finish_reason == 1:
                     finish_reason = "stop"
@@ -360,29 +363,9 @@ async def on_message(new_msg: discord.Message) -> None:
 
                 response_contents[-1] += new_content
 
-                if not use_plain_responses:
-                    time_delta = datetime.now().timestamp() - last_task_time
-
-                    ready_to_edit = time_delta >= EDIT_DELAY_SECONDS
-                    msg_split_incoming = finish_reason == None and len(response_contents[-1] + curr_content) > max_message_length
-                    is_final_edit = finish_reason != None or msg_split_incoming
-                    is_good_finish = finish_reason != None and finish_reason.lower() in ("stop", "end_turn")
-
-                    if start_next_msg or ready_to_edit or is_final_edit:
-                        embed.description = response_contents[-1] if is_final_edit else (response_contents[-1] + STREAMING_INDICATOR)
-                        embed.color = EMBED_COLOR_COMPLETE if msg_split_incoming or is_good_finish else EMBED_COLOR_INCOMPLETE
-
-                        if start_next_msg:
-                            await reply_helper(embed=embed, silent=True)
-                        else:
-                            await asyncio.sleep(EDIT_DELAY_SECONDS - time_delta)
-                            await response_msgs[-1].edit(embed=embed)
-
-                        last_task_time = datetime.now().timestamp()
-
             if use_plain_responses:
                 for content in response_contents:
-                    await reply_helper(view=LayoutView().add_item(TextDisplay(content=content)))
+                    await reply_helper(content=content)
 
     except Exception:
         logging.exception("Error while generating response")

@@ -81,6 +81,9 @@ models:
     reasoning_effort: high
     verbosity: medium
 
+  google/gemini-1.5-flash:
+    temperature: 1.0 # Only works if use_native_api is true
+
   openrouter/x-ai/grok-4-fast:online:
 
   ollama/llama4:
